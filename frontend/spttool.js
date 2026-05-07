@@ -1,6 +1,8 @@
 /* ═══════════════════════════════════════
    STATE  –  persisted via localStorage
 ═══════════════════════════════════════ */
+
+
 let currentUser = null;
 let currentAlarmHabit = null;
 
