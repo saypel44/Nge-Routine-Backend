@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Quick Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&family=Fraunces:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<script>
+/* ── Inline Chart.js-compatible line chart renderer ──
+   Covers all Chart usage in this app: type:'line' with
+   responsive canvas, tooltips, gridlines, tick callbacks.
+   No external dependencies, works from file:// with no
+   tracking-prevention issues.
+─────────────────────────────────────────────────────── */
+(function(global){
+  'use strict';
+
+  const instances = new Map();
+
+  function Chart(canvas, config) {
+    if (!(this instanceof Chart)) return new Chart(canvas, config);
+    this.canvas = canvas;
+    this.config = config;
+    this._tooltip = null;
+    const existing = instances.get(canvas);
+    if (existing) existing.destroy();
+    instances.set(canvas, this);
+    this._resize();
+    this._draw();
+    this._bindEvents();
+  }
+
+
+
+  Chart.prototype._resize = function() {
+    const parent = this.canvas.parentElement;
+    if (!parent) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = parent.clientWidth || 300;
+    const h = parent.clientHeight || 200;
+    this.canvas.width  = w * dpr;
+    this.canvas.height = h * dpr;
+    this.canvas.style.width  = w + 'px';
+    this.canvas.style.height = h + 'px';
+    this._dpr = dpr;
+    this._w = w;
+    this._h = h;
+  };
+
+  Chart.prototype._bindEvents = function() {
+    const self = this;
+
+    // ── helpers to compute layout (mirrors _draw layout) ──
+    function _layout() {
+      const PAD_TOP = 16, PAD_RIGHT = 16, PAD_BOTTOM = 44, PAD_LEFT = 44;
+      const W = self._w || self.canvas.width;
+      const H = self._h || self.canvas.height;
+      return { plotX: PAD_LEFT, plotY: PAD_TOP,
+               plotW: W - PAD_LEFT - PAD_RIGHT,
+               plotH: H - PAD_TOP - PAD_BOTTOM, W, H };
+    }
+
+    // Find the nearest dot across all datasets to a mouse position
+    function _nearestDot(mx, my) {
+      const { plotX, plotY, plotW, plotH } = _layout();
+      const data = self.config.data || {};
+      const datasets = (data.datasets || []).filter(ds => ds.data && ds.data.length);
+      const labels = data.labels || [];
+      if (!labels.length) return null;
+
+      const allVals = [];
+      datasets.forEach(ds => ds.data.forEach(v => { if (v !== null && v !== undefined) allVals.push(+v); }));
+      const scaleOpts = ((self.config.options || {}).scales || {}).y || {};
+      const yMin = scaleOpts.min !== undefined ? scaleOpts.min : Math.min(0, ...allVals);
+      const yMax = scaleOpts.max !== undefined ? scaleOpts.max : (Math.max(...allVals) * 1.1 || 1);
+
+      function toX(i) { return plotX + (i / Math.max(labels.length - 1, 1)) * plotW; }
+      function toY(v) { return plotY + plotH - ((v - yMin) / (yMax - yMin)) * plotH; }
+
+      let best = null, bestDist = 22; // px snap radius
+      datasets.forEach(ds => {
+        const pr = ds.pointRadius !== undefined ? ds.pointRadius : 4;
+        const snapR = Math.max(pr + 8, 16);
+        ds.data.forEach((v, i) => {
+          if (v === null || v === undefined) return;
+          const dx = mx - toX(i), dy = my - toY(+v);
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < snapR && dist < bestDist) {
+            bestDist = dist;
+            best = { ds, i, v: +v, label: labels[i], color: ds.borderColor || '#1D9E75' };
+          }
+        });
+      });
+      return best;
+    }
+
+    this._mouseMove = function(e) {
+      const rect = self.canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const dot = _nearestDot(mx, my);
+      self._hoveredDot = dot;
+      self.canvas.style.cursor = dot ? 'pointer' : 'default';
+      self._draw();
+    };
+    this._mouseLeave = function() {
+      self._hoveredDot = null;
+      self.canvas.style.cursor = 'default';
+      self._draw();
+    };
+    this._click = function(e) {
+      const rect = self.canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const dot = _nearestDot(mx, my);
+      if (dot && self.config.options && self.config.options.onClick) {
+        self.config.options.onClick(dot);
+      }
+    };
+    this.canvas.addEventListener('mousemove', this._mouseMove);
+    this.canvas.addEventListener('mouseleave', this._mouseLeave);
+    this.canvas.addEventListener('click', this._click);
+
+    if (typeof ResizeObserver !== 'undefined') {
+      this._resizeObs = new ResizeObserver(function() {
+        self._resize();
+        self._draw();
+      });
+      if (this.canvas.parentElement) this._resizeObs.observe(this.canvas.parentElement);
+    }
+  };
+
+  Chart.prototype.destroy = function() {
+    if (this._resizeObs) this._resizeObs.disconnect();
+    if (this._mouseMove)  this.canvas.removeEventListener('mousemove',  this._mouseMove);
+    if (this._mouseLeave) this.canvas.removeEventListener('mouseleave', this._mouseLeave);
+    if (this._click)      this.canvas.removeEventListener('click',      this._click);
+    instances.delete(this.canvas);
+    const ctx = this.canvas.getContext('2d');
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+  };
+
+  Chart.prototype._draw = function() {
+    const canvas = this.canvas;
+    const ctx = canvas.getContext('2d');
+    const dpr = this._dpr || 1;
+    const W = this._w || canvas.width;
+    const H = this._h || canvas.height;
+    const opts = this.config.options || {};
+    const data = this.config.data || {};
+    const datasets = (data.datasets || []).filter(ds => ds.data && ds.data.length);
+    const labels = data.labels || [];
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, W, H);
+
+    // Layout
+    const PAD_TOP = 16, PAD_RIGHT = 16, PAD_BOTTOM = 44, PAD_LEFT = 44;
+    const plotX = PAD_LEFT, plotY = PAD_TOP;
+    const plotW = W - PAD_LEFT - PAD_RIGHT;
+    const plotH = H - PAD_TOP - PAD_BOTTOM;
+
+    if (!datasets.length || !labels.length) {
+      ctx.fillStyle = '#a09c96';
+      ctx.font = '13px Sora,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('No data yet', W / 2, H / 2);
+      ctx.restore();
+      return;
+    }
+
+    // Collect all numeric values
+    const allVals = [];
+    datasets.forEach(ds => ds.data.forEach(v => { if (v !== null && v !== undefined) allVals.push(+v); }));
+    const scaleOpts = (opts.scales && opts.scales.y) || {};
+    const rawMin = scaleOpts.min !== undefined ? scaleOpts.min : Math.min(0, ...allVals);
+    const rawMax = scaleOpts.max !== undefined ? scaleOpts.max : Math.max(...allVals) * 1.1 || 1;
+    const yMin = rawMin, yMax = rawMax;
+
+    function toX(i) { return plotX + (i / Math.max(labels.length - 1, 1)) * plotW; }
+    function toY(v) { return plotY + plotH - ((v - yMin) / (yMax - yMin)) * plotH; }
+
+    // Grid lines
+    const maxTicks = (scaleOpts.ticks && scaleOpts.ticks.maxTicksLimit) || 6;
+    const tickStep = (scaleOpts.ticks && scaleOpts.ticks.stepSize) ? scaleOpts.ticks.stepSize : (yMax - yMin) / (maxTicks - 1);
+    ctx.strokeStyle = 'rgba(0,0,0,0.04)';
+    ctx.lineWidth = 1;
+    for (let v = yMin; v <= yMax + 0.001; v += tickStep) {
+      const y = toY(v);
+      ctx.beginPath(); ctx.moveTo(plotX, y); ctx.lineTo(plotX + plotW, y); ctx.stroke();
+      const tickCb = scaleOpts.ticks && scaleOpts.ticks.callback;
+      const label = tickCb ? tickCb(+v.toFixed(2)) : +v.toFixed(1);
+      ctx.fillStyle = '#a09c96';
+      ctx.font = '10px Sora,sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(label, plotX - 4, y + 4);
+    }
+
+    // X axis labels
+    const maxXLabels = Math.floor(plotW / 48);
+    const xStep = Math.max(1, Math.ceil(labels.length / maxXLabels));
+    ctx.fillStyle = '#a09c96';
+    ctx.font = '10px Sora,sans-serif';
+    ctx.textAlign = 'center';
+    labels.forEach((lbl, i) => {
+      if (i % xStep !== 0 && i !== labels.length - 1) return;
+      ctx.fillText(lbl, toX(i), plotY + plotH + 16);
+    });
+
+    // Determine hovered dot for highlight
+    const hovDot = this._hoveredDot;
+
+    // Datasets
+    datasets.forEach(ds => {
+      const color = ds.borderColor || '#1D9E75';
+      const pts = ds.data.map((v, i) => v !== null && v !== undefined ? { x: toX(i), y: toY(+v), v: +v, i } : null);
+
+      // Fill
+      if (ds.fill) {
+        ctx.beginPath();
+        let started = false;
+        pts.forEach(p => {
+          if (!p) return;
+          if (!started) { ctx.moveTo(p.x, p.y); started = true; } else { ctx.lineTo(p.x, p.y); }
+        });
+        ctx.lineTo(toX(pts.length - 1), toY(yMin));
+        ctx.lineTo(toX(0), toY(yMin));
+        ctx.closePath();
+        ctx.fillStyle = ds.backgroundColor || color + '22';
+        ctx.fill();
+      }
+
+      // Line
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      let lineStarted = false;
+      pts.forEach(p => {
+        if (!p) { lineStarted = false; return; }
+        if (!lineStarted) { ctx.moveTo(p.x, p.y); lineStarted = true; } else { ctx.lineTo(p.x, p.y); }
+      });
+      ctx.stroke();
+
+      // Points — enlarge hovered dot
+      const pr = ds.pointRadius !== undefined ? ds.pointRadius : 4;
+      pts.forEach(p => {
+        if (!p) return;
+        const isHov = hovDot && hovDot.ds === ds && hovDot.i === p.i;
+        const r = isHov ? pr + 3 : pr;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = ds.pointBackgroundColor || color;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = isHov ? 2.5 : 1.5;
+        ctx.stroke();
+        // Outer ring on hovered dot
+        if (isHov) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r + 4, 0, Math.PI * 2);
+          ctx.strokeStyle = color + '55';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      });
+    });
+
+    // Dot-precise tooltip
+    if (hovDot) {
+      const { ds, i, v, label, color } = hovDot;
+      const dotX = toX(i);
+      const dotY = toY(v);
+
+      // Cross-hair lines
+      ctx.save();
+      ctx.strokeStyle = color + '44';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(dotX, plotY); ctx.lineTo(dotX, plotY + plotH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(plotX, dotY); ctx.lineTo(plotX + plotW, dotY); ctx.stroke();
+      ctx.restore();
+
+      // Tooltip content
+      const ttOpts = opts.plugins && opts.plugins.tooltip;
+      let lbl = ` ${ds.label}: ${v}`;
+      if (ttOpts && ttOpts.callbacks && ttOpts.callbacks.label) {
+        const res = ttOpts.callbacks.label({ parsed: { y: v }, dataset: ds });
+        if (res !== null && res !== undefined) lbl = res;
+      }
+
+      const padding = 10;
+      const lineH = 19;
+      const lines = [
+        { text: label, color: '#6b6660', bold: true },
+        { text: lbl, color: '#1a1816' }
+      ];
+      const boxW = Math.max(...lines.map(l => l.text.length * 7.2)) + padding * 2 + 14;
+      const boxH = lines.length * lineH + padding * 2;
+
+      let bx = dotX + 14;
+      let by = dotY - boxH / 2;
+      if (bx + boxW > W - 4) bx = dotX - boxW - 14;
+      if (by < 2) by = 2;
+      if (by + boxH > H - 4) by = H - boxH - 4;
+
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.15)';
+      ctx.shadowBlur = 10;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.roundRect(bx, by, boxW, boxH, 7);
+      ctx.fill();
+      // Color accent left bar
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, 3, boxH, [7, 0, 0, 7]);
+      ctx.fill();
+      ctx.restore();
+
+      lines.forEach((line, li) => {
+        const ty = by + padding + li * lineH + lineH * 0.65;
+        ctx.fillStyle = line.color;
+        ctx.font = line.bold ? '600 11px Sora,sans-serif' : '12px Sora,sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(line.text, bx + padding + 6, ty);
+      });
+    }
+
+    ctx.restore();
+  };
+
+  global.Chart = Chart;
+}(window));
+</script>
+<link rel="stylesheet" href="spttool.css">
+</head>
+<body>
+
+<!-- ══════════════════ AUTH ══════════════════ -->
+<div id="auth-screen" class="screen active">
+  <div class="auth-card">
+    <div class="auth-top">
+      <div class="auth-logo-wrap">
+        <img src="../logo.png" alt="SomPel Tech Logo" class="auth-logo-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div class="auth-logo-fallback" style="display:none">
+          <span>SPT</span>
+        </div>
+      </div>
+      <h1>ངེ་ Routine</h1>
+      <p>Personalised wellness check-ins, just for you</p>
+    </div>
+    <div class="auth-tabs">
+      <button class="auth-tab active" onclick="switchTab('login')">Sign in</button>
+      <button class="auth-tab" onclick="switchTab('signup')">Create account</button>
+    </div>
+    <div class="auth-body">
+      <div id="tab-login">
+        <form action="javascript:void(0)" onsubmit="doLogin()" autocomplete="on">
+          <div class="field"><label>User ID</label><input id="li-user" type="text" placeholder="Enter your user ID" autocomplete="username"></div>
+          <div class="field"><label>Password</label><div class="pw-wrap"><input id="li-pass" type="password" placeholder="Enter your password" autocomplete="current-password"><button type="button" class="pw-toggle" onclick="togglePw('li-pass',this)" tabindex="-1">👁</button></div></div>
+          <button type="submit" class="auth-btn">Sign in →</button>
+        </form>
+        <div class="forgot-row"><button type="button" class="forgot-link" onclick="toggleForgotPanel()">Forgot password?</button></div>
+        <div id="forgot-panel" class="forgot-panel" style="display:none">
+          <div class="forgot-panel-title">Reset Password</div>
+          <form action="javascript:void(0)" onsubmit="doResetPassword()" autocomplete="on">
+          <div class="field" style="margin-bottom:10px"><label>User ID</label><input id="fp-user" type="text" placeholder="Enter your user ID" autocomplete="username"></div>
+          <div class="field" style="margin-bottom:10px"><label>New Password</label><div class="pw-wrap"><input id="fp-new-pass" type="password" placeholder="At least 6 characters" autocomplete="new-password"><button type="button" class="pw-toggle" onclick="togglePw('fp-new-pass',this)" tabindex="-1">👁</button></div></div>
+          <div class="field" style="margin-bottom:10px"><label>Confirm Password</label><div class="pw-wrap"><input id="fp-confirm-pass" type="password" placeholder="Re-enter new password" autocomplete="new-password"><button type="button" class="pw-toggle" onclick="togglePw('fp-confirm-pass',this)" tabindex="-1">👁</button></div></div>
+          <button type="submit" class="auth-btn">Reset Password →</button>
+          </form>
+          <div id="fp-msg" class="auth-msg"></div>
+        </div>
+        <div id="li-msg" class="auth-msg"></div>
+      </div>
+      <div id="tab-signup" style="display:none">
+        <form action="javascript:void(0)" onsubmit="doSignup()" autocomplete="on">
+          <div class="field"><label>Full name</label><input id="su-name" type="text" placeholder="e.g. Tshering Wangmo" autocomplete="name"></div>
+          <div class="field"><label>Choose a User ID</label><input id="su-user" type="text" placeholder="e.g. tshering99" autocomplete="username"></div>
+          <div class="field"><label>Create password</label><div class="pw-wrap"><input id="su-pass" type="password" placeholder="At least 6 characters" autocomplete="new-password"><button type="button" class="pw-toggle" onclick="togglePw('su-pass',this)" tabindex="-1">👁</button></div></div>
+          <button type="submit" class="auth-btn">Create account →</button>
+        </form>
+        <div id="su-msg" class="auth-msg"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════ APP ══════════════════ -->
+<div id="app-screen" class="screen">
+  <div class="app-header">
+    <div class="app-logo">
+      <div class="app-logo-icon">
+        <img src="../logo.png" alt="Logo" class="app-logo-img" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"><span class="app-logo-spt-fallback" style="display:none">SPT</span>
+      </div>
+    </div>
+    <div class="user-pill" onclick="openSettings()" title="Settings">
+      <div class="user-avatar" id="hdr-avatar"></div>
+      <span class="user-pill-name" id="hdr-name"></span>
+      <span class="user-pill-caret">⚙</span>
+    </div>
+  </div>
+
+  <div class="nav-tabs">
+    <button class="nav-tab active" onclick="showTab('check-in')">Check-In</button>
+    <button class="nav-tab" onclick="showTab('tracker')">📋 Tracker</button>
+    <button class="nav-tab" onclick="showTab('history')">📅 History</button>
+    <button class="nav-tab" onclick="showTab('trends')">📈 Trends</button>
+  </div>
+
+  <!-- ── CHECK-IN TAB ── -->
+  <div id="tab-check-in" class="tab-pane active">
+    <div class="hero">
+      <div class="hero-icon">
+         <span>ངེ་ Routine</span>
+        <!-- <img src="../logo.png" alt="Logo" class="hero-logo-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><span class="hero-logo-fallback" style="display:none">SPT</span> -->
+      </div>
+      <h2>Hello, <span id="greeting-name"></span> 👋</h2>
+      <p>What’s your day ? Get simple, gentle guidance made for you.</p>
+      <div class="prog-wrap">
+        <div class="prog-meta"><span>Your progress</span><span id="prog-txt">0 of 12</span></div>
+        <div class="prog-bar"><div class="prog-fill" id="prog-bar" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <form id="tracker-form" onsubmit="return false">
+      <div class="sec-hdr"><div class="sec-pill a"><div class="sec-dot"><span>A</span></div> About you</div><div class="sec-line"></div></div>
+
+      <div class="q-card">
+        <div class="q-num">Question 1</div><p class="q-title">How old are you?</p>
+        <div class="opts" data-q="age">
+          <button type="button" class="opt" data-v="Under 18"><span class="opt-em"></span> Under 18</button>
+          <button type="button" class="opt" data-v="18–25"><span class="opt-em"></span> 18 – 25</button>
+          <button type="button" class="opt" data-v="26–35"><span class="opt-em"></span> 26 – 35</button>
+          <button type="button" class="opt" data-v="36–50"><span class="opt-em"></span> 36 – 50</button>
+          <button type="button" class="opt" data-v="50+"><span class="opt-em"></span> Over 50</button>
+        </div>
+      </div>
+
+      <div class="q-card">
+        <div class="q-num">Question 2</div><p class="q-title">Where do you live?</p>
+        <div class="opts" data-q="location">
+          <button type="button" class="opt" data-v="Urban"><span class="opt-em"></span> City</button>
+          <button type="button" class="opt" data-v="Semi-urban"><span class="opt-em"></span> Remote</button>
+        </div>
+      </div>
+
+      <div class="q-card">
+        <div class="q-num">Question 3</div><p class="q-title">What kind of work do you do most of the time?</p>
+        <div class="opts" data-q="worktype">
+          <button type="button" class="opt" data-v="Sitting"><span class="opt-em"></span> Mental </button>
+          <button type="button" class="opt" data-v="Physical"><span class="opt-em"></span> Physical</button>
+          <button type="button" class="opt" data-v="Both"><span class="opt-em"></span> Both </button>
+        </div>
+      </div>
+
+      <div class="sec-hdr"><div class="sec-pill b"><div class="sec-dot"><span>B</span></div> Daily habits</div><div class="sec-line"></div></div>
+
+      <div class="q-card">
+        <div class="q-num">Question 4</div><p class="q-title">How many hours do you work on a normal day?</p>
+        <div class="opts" data-q="workhours">
+          <button type="button" class="opt" data-v="0–4 hours"><span class="opt-em"></span> 0–4 hrs</button>
+          <button type="button" class="opt" data-v="5–6 hours"><span class="opt-em"></span> 5–6 hrs</button>
+          <button type="button" class="opt" data-v="7–8 hours"><span class="opt-em"></span> 7–8 hrs</button>
+          <button type="button" class="opt" data-v="9 or more hours"><span class="opt-em"></span> 9+ hrs</button>
+        </div>
+      </div>
+
+      <div class="q-card">
+        <div class="q-num">Question 5</div><p class="q-title">How many hours do you sleep most nights?</p>
+        <div class="opts" data-q="sleep">
+          <button type="button" class="opt" data-v="0–4 hours"><span class="opt-em"></span> 0–4 hrs</button>
+          <button type="button" class="opt" data-v="5–6 hours"><span class="opt-em"></span> 5–6 hrs</button>
+          <button type="button" class="opt" data-v="7–8 hours"><span class="opt-em"></span> 7–8 hrs</button>
+          <button type="button" class="opt" data-v="9 or more hours"><span class="opt-em"></span> 9+ hrs</button>
+        </div>
+      </div>
+
+      <div class="q-card">
+        <div class="q-num">Question 6</div><p class="q-title">How long do you use your phone before going to sleep?</p>
+        <div class="opts" data-q="phonetime">
+          <button type="button" class="opt" data-v="no phone before bed"><span class="opt-em"></span> No phone</button>
+          <!-- <button type="button" class="opt" data-v="less than 30 minutes"><span class="opt-em"></span> Under 30 min</button> -->
+          <button type="button" class="opt" data-v="30 min–1 hour"><span class="opt-em"></span> 30 min – 1 hr</button>
+          <button type="button" class="opt" data-v="1–2 hours"><span class="opt-em"></span> 1–2 hrs</button>
+          <button type="button" class="opt" data-v="2–3 hours"><span class="opt-em"></span> 2–3 hrs</button>
+          <button type="button" class="opt" data-v="more than 3 hours"><span class="opt-em"></span> 3+ hrs</button>
+        </div>
+      </div>
+
+      <div class="q-card">
+        <div class="q-num">Question 7</div><p class="q-title">What time do you usually go to sleep?</p>
+        <div class="opts" data-q="bedtime">
+          <!-- <button type="button" class="opt" data-v="before 9 PM"><span class="opt-em"></span> Before 9 pm</button> -->
+          <button type="button" class="opt" data-v="9–10 PM"><span class="opt-em"></span> 9–10 pm</button>
+          <button type="button" class="opt" data-v="10–11 PM"><span class="opt-em"></span> 10–11 pm</button>
+          <button type="button" class="opt" data-v="11 PM–12 AM"><span class="opt-em"></span> 11 pm–midnight</button>
+          <button type="button" class="opt" data-v="after 12 AM"><span class="opt-em"></span> After midnight</button>
+        </div>
+      </div>
+
+      <div class="sec-hdr"><div class="sec-pill c"><div class="sec-dot"><span>C</span></div> How you feel</div><div class="sec-line"></div></div>
+
+      <div class="q-card">
+        <div class="q-num">Questions 8 – 12</div>
+        <p class="q-title" style="margin-bottom:16px">Do you agree with each of these?</p>
+        <div class="lik-row" id="lik-container"></div>
+      </div>
+
+      <button type="button" id="submit-btn" disabled onclick="showResults()">See my results →</button>
+    </form>
+
+    <div id="results"></div>
+  </div>
+
+  <!-- ── TRACKER TAB ── -->
+  <div id="tab-tracker" class="tab-pane">
+    <!-- Schedule list (shown when schedules exist) -->
+    <div id="tracker-schedules-wrap" style="display:none">
+      <div class="tracker-list-header">
+        <div>
+          <p class="tracker-page-title" style="margin:0">My Schedules</p>
+          <p class="tracker-page-sub" style="margin:4px 0 0">Your planned activities — tap Edit to update</p>
+        </div>
+        <button class="tracker-add-btn" onclick="openScheduleModal()" title="Add new schedule">＋</button>
+      </div>
+
+       <!-- ── STOPWATCH ── -->
+    <div class="tool-card" style="margin-top:16px">
+      <div class="tool-card-title">⏱ Stopwatch</div>
+      <p class="tool-card-sub">Track how long an activity takes.</p>
+
+      <div class="sw-display" id="sw-display">00:00:00</div>
+
+      <div class="sw-btns">
+        <button class="sw-btn start" id="sw-start-btn" onclick="swStartStop()">▶ Start</button>
+        <button class="sw-btn stop" id="sw-stop-btn" onclick="swStop()" disabled>⏹ Stop</button>
+        <button class="sw-btn reset" id="sw-reset-btn" onclick="swReset()" disabled>↺ Reset</button>
+      </div>
+     <div id="sw-stop" style="margin-top:10px"></div>
+    </div>
+
+      <!-- Log to habit after stopping -->
+      <div id="sw-log-section" style="display:none;margin-top:14px">
+        <div class="add-alarm-section-lbl" style="margin-bottom:8px">📝 Log this time to a habit?</div>
+        <div class="aa-categories" id="sw-categories">
+          <button type="button" class="aa-cat-btn" data-cat="Work" onclick="swSelectCat(this)">💻 Work</button>
+          <button type="button" class="aa-cat-btn" data-cat="Studies" onclick="swSelectCat(this)">📚 Studies</button>
+          <button type="button" class="aa-cat-btn" data-cat="Exercise" onclick="swSelectCat(this)">🏃 Exercise</button>
+          <button type="button" class="aa-cat-btn" data-cat="Meditation" onclick="swSelectCat(this)">🧘 Meditation</button>
+          <button type="button" class="aa-cat-btn" data-cat="Reading" onclick="swSelectCat(this)">📖 Reading</button>
+          <input 
+            type="text" 
+            class="aa-custom-input" 
+            id="sc-custom-activity" 
+            placeholder="Type activity name" 
+            oninput="scClearCatIfTyping()"
+          >
+          <!-- <button type="button" class="aa-cat-btn" data-cat="Other" onclick="swSelectCat(this)">✍ Other</button> -->
+        </div>
+        <button class="log-btn" style="margin-top:10px;width:100%" onclick="swLogTime()">💾 Save to History</button>
+        <div id="sw-log-msg" class="auth-msg" style="margin-top:6px"></div>
+      </div>
+    </div>  
+
+      <div id="tracker-schedule-list"></div>
+    
+    <!-- Empty state with centered + button -->
+    <div class="tracker-empty-state" id="tracker-empty-state">
+      <div class="tracker-empty-icon">📋</div>
+      <h3 class="tracker-empty-title">No schedules yet</h3>
+      <p class="tracker-empty-sub">Tap the button below to add your first scheduled activity</p>
+      <button class="tracker-fab-center" onclick="openScheduleModal()" title="Add Schedule">
+        <span class="tracker-fab-plus">＋</span>
+        <span class="tracker-fab-label">Add Schedule</span>
+      </button>
+    </div>  
+  </div>
+
+  <!-- ── HISTORY TAB ── -->
+  <div id="tab-history" class="tab-pane">
+    <p class="tracker-page-title">History & Planning</p>
+    <!-- <p class="tracker-page-sub">Tap any day to see logs — or plan ahead by tapping a future date.</p> -->
+
+    <!-- History list -->
+    <div style="margin-top:20px">
+      <div class="lf-section-lbl" style="font-size:13px;color:var(--text);font-weight:600;text-transform:none;letter-spacing:0;margin-bottom:10px">All Logs</div>
+      <div id="history-filter" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>
+      <div id="history-content"></div>
+    </div>
+  </div>
+
+  <!-- ── TRENDS TAB ── -->
+  <div id="tab-trends" class="tab-pane">
+    <p class="tracker-page-title">Trends & Insights</p>
+    <p class="tracker-page-sub">Based on your habit log history.</p>
+    <div class="export-row">
+      <button class="export-btn" onclick="exportExcel()">📊 Export to Excel</button>
+      <button class="export-btn" onclick="exportCSV()">📄 Export CSV</button>
+    </div>
+    <div id="trends-content"></div>
+  </div>
+
+  
+<!-- ── FLOATING + BUTTON (hidden on tracker, shown elsewhere) ── -->
+<!-- <button id="fab-add" class="fab-add" onclick="openAddAlarmModal()" title="Set a new alarm">＋</button> -->
+
+<!-- ── SCHEDULE MODAL ── -->
+<div id="schedule-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box schedule-modal-box">
+    <div class="add-alarm-header">
+      <div class="add-alarm-title" id="schedule-modal-title">📅 Add Schedule</div>
+      <button class="add-alarm-close" onclick="closeScheduleModal()">✕</button>
+    </div>
+
+    <!-- Category -->
+    <div class="add-alarm-section">
+      <div class="add-alarm-section-lbl">🎯 Activity</div>
+      <div class="aa-categories" id="sc-categories">
+        <button type="button" class="aa-cat-btn" data-cat="Sleep" onclick="scSelectCat(this)">🌙 Sleep</button>
+        <button type="button" class="aa-cat-btn" data-cat="Work" onclick="scSelectCat(this)">💻 Work</button>
+        <button type="button" class="aa-cat-btn" data-cat="Exercise" onclick="scSelectCat(this)">🏃 Exercise</button>
+        <button type="button" class="aa-cat-btn" data-cat="Studies" onclick="scSelectCat(this)">📚 Studies</button>
+        <button type="button" class="aa-cat-btn" data-cat="Meals" onclick="scSelectCat(this)">🍽 Meals</button>
+        <button type="button" class="aa-cat-btn" data-cat="Screen Use" onclick="scSelectCat(this)">📱 Screen Use</button>
+        <button type="button" class="aa-cat-btn" data-cat="Reading" onclick="scSelectCat(this)">📖 Reading</button>
+        <button type="button" class="aa-cat-btn" data-cat="Meditation" onclick="scSelectCat(this)">🧘 Meditation</button>
+        <!-- <button type="button" class="aa-cat-btn" data-cat="Other" onclick="scSelectCat(this)">✍ Other</button> -->
+      </div>
+      <input type="text" class="aa-custom-input" id="sc-custom-activity" placeholder="Type activity name" oninput="scClearCatIfTyping()">
+    </div>
+
+    <!-- Date -->
+    <div class="add-alarm-section">
+      <div class="add-alarm-section-lbl">📅 Date</div>
+      <input type="date" id="sc-date" class="lf-date-input">
+    </div>
+
+    <!-- Time range -->
+    <div class="add-alarm-section">
+      <div class="add-alarm-section-lbl">⏰ Time Range</div>
+      <div class="add-alarm-row">
+        <div class="ampm-field" style="flex:1">
+          <label>From</label>
+          <div class="ampm-wrap">
+            <select class="ampm-hour" id="sc-from-h"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8" selected>8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option></select>
+            <span class="ampm-sep">:</span>
+            <select class="ampm-min" id="sc-from-m"><option value="00">00</option><option value="01">01</option><option value="02">02</option><option value="03">03</option><option value="04">04</option><option value="05">05</option><option value="06">06</option><option value="07">07</option><option value="08">08</option><option value="09">09</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option><option value="21">21</option><option value="22">22</option><option value="23">23</option><option value="24">24</option><option value="25">25</option><option value="26">26</option><option value="27">27</option><option value="28">28</option><option value="29">29</option><option value="30">30</option><option value="31">31</option><option value="32">32</option><option value="33">33</option><option value="34">34</option><option value="35">35</option><option value="36">36</option><option value="37">37</option><option value="38">38</option><option value="39">39</option><option value="40">40</option><option value="41">41</option><option value="42">42</option><option value="43">43</option><option value="44">44</option><option value="45">45</option><option value="46">46</option><option value="47">47</option><option value="48">48</option><option value="49">49</option><option value="50">50</option><option value="51">51</option><option value="52">52</option><option value="53">53</option><option value="54">54</option><option value="55">55</option><option value="56">56</option><option value="57">57</option><option value="58">58</option><option value="59">59</option></select>
+            <div class="ampm-toggle">
+              <button type="button" class="ampm-btn sel" id="sc-from-am" onclick="scSetAmPm('from','AM')">AM</button>
+              <button type="button" class="ampm-btn" id="sc-from-pm" onclick="scSetAmPm('from','PM')">PM</button>
+            </div>
+          </div>
+        </div>
+        <div class="ampm-arrow" style="padding-bottom:8px">→</div>
+        <div class="ampm-field" style="flex:1">
+          <label>Until</label>
+          <div class="ampm-wrap">
+            <select class="ampm-hour" id="sc-to-h"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9" selected>9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option></select>
+            <span class="ampm-sep">:</span>
+            <select class="ampm-min" id="sc-to-m"><option value="00">00</option><option value="01">01</option><option value="02">02</option><option value="03">03</option><option value="04">04</option><option value="05">05</option><option value="06">06</option><option value="07">07</option><option value="08">08</option><option value="09">09</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option><option value="21">21</option><option value="22">22</option><option value="23">23</option><option value="24">24</option><option value="25">25</option><option value="26">26</option><option value="27">27</option><option value="28">28</option><option value="29">29</option><option value="30">30</option><option value="31">31</option><option value="32">32</option><option value="33">33</option><option value="34">34</option><option value="35">35</option><option value="36">36</option><option value="37">37</option><option value="38">38</option><option value="39">39</option><option value="40">40</option><option value="41">41</option><option value="42">42</option><option value="43">43</option><option value="44">44</option><option value="45">45</option><option value="46">46</option><option value="47">47</option><option value="48">48</option><option value="49">49</option><option value="50">50</option><option value="51">51</option><option value="52">52</option><option value="53">53</option><option value="54">54</option><option value="55">55</option><option value="56">56</option><option value="57">57</option><option value="58">58</option><option value="59">59</option></select>
+            <div class="ampm-toggle">
+              <button type="button" class="ampm-btn sel" id="sc-to-am" onclick="scSetAmPm('to','AM')">AM</button>
+              <button type="button" class="ampm-btn" id="sc-to-pm" onclick="scSetAmPm('to','PM')">PM</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="aa-duration-display" id="sc-duration-display">Total Duration: —</div>
+    </div>
+
+        <!-- Sound -->
+    <div class="add-alarm-section">
+      <div class="add-alarm-section-lbl">🔔 Alarm Sound</div>
+      <div class="sound-opts" id="aa-sounds">
+        <button class="sound-btn sel" data-sound="bell" onclick="aaSelectSound(this)">🔔 Bell</button>
+        <button class="sound-btn" data-sound="chime" onclick="aaSelectSound(this)">🎵 Chime</button>
+        <button class="sound-btn" data-sound="nature" onclick="aaSelectSound(this)">🌿 Nature</button>
+        <button class="sound-btn" data-sound="soft" onclick="aaSelectSound(this)">🎶 Soft Tone</button>
+        <button class="upload-sound-btn" onclick="document.getElementById('aa-sound-upload').click()">📎 My Sound</button>
+        <input type="file" id="aa-sound-upload" accept="audio/*" style="display:none" onchange="aaUploadSound(this)">
+      </div>
+    </div>
+
+
+    <!-- Plan Your Day -->
+    <div class="add-alarm-section">
+      <div class="add-alarm-section-lbl">📝 Plan for the day <span style="font-weight:400;color:var(--hint);text-transform:none">— what to do?</span></div>
+      
+      <!-- Checklist items container -->
+      <div id="sc-checklist" class="sc-checklist"></div>
+
+      <!-- Add task input -->
+      <div class="sc-task-input-row">
+        <input type="text" id="sc-task-input" class="aa-custom-input sc-task-input" placeholder="Type a task and press Enter or ＋…" onkeydown="scHandleTaskKey(event)">
+        <button type="button" class="sc-add-task-btn" onclick="scAddTask()">＋</button>
+      </div>
+
+      <!-- Quick-add suggestions -->
+      <div class="sc-quick-chips" id="sc-quick-chips">
+        <span class="sc-chips-label">Quick add:</span>
+        <button type="button" class="sc-quick-chip" onclick="scQuickAdd(this)">Review notes</button>
+        <button type="button" class="sc-quick-chip" onclick="scQuickAdd(this)">Warm up</button>
+        <button type="button" class="sc-quick-chip" onclick="scQuickAdd(this)">Drink water</button>
+        <button type="button" class="sc-quick-chip" onclick="scQuickAdd(this)">No phone</button>
+        <button type="button" class="sc-quick-chip" onclick="scQuickAdd(this)">Stretch</button>
+        <button type="button" class="sc-quick-chip" onclick="scQuickAdd(this)">Meditate</button>
+      </div>
+    </div>
+
+    
+
+    <!-- Save -->
+    <div class="add-alarm-section" style="border-bottom:none">
+      <button class="auth-btn" onclick="saveSchedule()" id="sc-save-btn">💾 Save Schedule</button>
+      <div id="sc-msg" class="auth-msg" style="margin-top:10px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── ADD ALARM MODAL ── -->
+<div id="add-alarm-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box add-alarm-box">
+    <div class="add-alarm-header">
+      <div class="add-alarm-title">⏰ Set Alarm</div>
+      <button class="add-alarm-close" onclick="closeAddAlarmModal()">✕</button>
+    </div>
+
+    <!-- Time range -->
+    <div class="add-alarm-section">
+      <div class="add-alarm-row">
+        <div class="ampm-field" style="flex:1">
+          <label>From</label>
+          <div class="ampm-wrap">
+            <select class="ampm-hour" id="aa-from-h"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8" selected>8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option></select>
+            <span class="ampm-sep">:</span>
+            <select class="ampm-min" id="aa-from-m"><option value="00">00</option><option value="01">01</option><option value="02">02</option><option value="03">03</option><option value="04">04</option><option value="05">05</option><option value="06">06</option><option value="07">07</option><option value="08">08</option><option value="09">09</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option><option value="21">21</option><option value="22">22</option><option value="23">23</option><option value="24">24</option><option value="25">25</option><option value="26">26</option><option value="27">27</option><option value="28">28</option><option value="29">29</option><option value="30">30</option><option value="31">31</option><option value="32">32</option><option value="33">33</option><option value="34">34</option><option value="35">35</option><option value="36">36</option><option value="37">37</option><option value="38">38</option><option value="39">39</option><option value="40">40</option><option value="41">41</option><option value="42">42</option><option value="43">43</option><option value="44">44</option><option value="45">45</option><option value="46">46</option><option value="47">47</option><option value="48">48</option><option value="49">49</option><option value="50">50</option><option value="51">51</option><option value="52">52</option><option value="53">53</option><option value="54">54</option><option value="55">55</option><option value="56">56</option><option value="57">57</option><option value="58">58</option><option value="59">59</option></select>
+            <div class="ampm-toggle">
+              <button type="button" class="ampm-btn sel" id="aa-from-am" onclick="aaSetAmPm('from','AM')">AM</button>
+              <button type="button" class="ampm-btn" id="aa-from-pm" onclick="aaSetAmPm('from','PM')">PM</button>
+            </div>
+          </div>
+        </div>
+        <div class="ampm-arrow" style="padding-bottom:8px">→</div>
+        <div class="ampm-field" style="flex:1">
+          <label>Until</label>
+          <div class="ampm-wrap">
+            <select class="ampm-hour" id="aa-to-h"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9" selected>9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option></select>
+            <span class="ampm-sep">:</span>
+            <select class="ampm-min" id="aa-to-m"><option value="00">00</option><option value="01">01</option><option value="02">02</option><option value="03">03</option><option value="04">04</option><option value="05">05</option><option value="06">06</option><option value="07">07</option><option value="08">08</option><option value="09">09</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option><option value="21">21</option><option value="22">22</option><option value="23">23</option><option value="24">24</option><option value="25">25</option><option value="26">26</option><option value="27">27</option><option value="28">28</option><option value="29">29</option><option value="30">30</option><option value="31">31</option><option value="32">32</option><option value="33">33</option><option value="34">34</option><option value="35">35</option><option value="36">36</option><option value="37">37</option><option value="38">38</option><option value="39">39</option><option value="40">40</option><option value="41">41</option><option value="42">42</option><option value="43">43</option><option value="44">44</option><option value="45">45</option><option value="46">46</option><option value="47">47</option><option value="48">48</option><option value="49">49</option><option value="50">50</option><option value="51">51</option><option value="52">52</option><option value="53">53</option><option value="54">54</option><option value="55">55</option><option value="56">56</option><option value="57">57</option><option value="58">58</option><option value="59">59</option></select>
+            <div class="ampm-toggle">
+              <button type="button" class="ampm-btn sel" id="aa-to-am" onclick="aaSetAmPm('to','AM')">AM</button>
+              <button type="button" class="ampm-btn" id="aa-to-pm" onclick="aaSetAmPm('to','PM')">PM</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="aa-duration-display" id="aa-duration-display">Total Duration: —</div>
+    </div>
+
+    <!-- Purpose / category -->
+    <div class="add-alarm-section">
+      <div class="add-alarm-section-lbl">🎯 Alarm Purpose</div>
+      <div class="aa-categories" id="aa-categories">
+        <button type="button" class="aa-cat-btn" data-cat="Studies" onclick="aaSelectCat(this)">📚 Studies</button>
+        <button type="button" class="aa-cat-btn" data-cat="Sleep" onclick="aaSelectCat(this)">😴 Sleep</button>
+        <button type="button" class="aa-cat-btn" data-cat="Screen Use" onclick="aaSelectCat(this)">📱 Screen Use</button>
+        <button type="button" class="aa-cat-btn" data-cat="Exercise" onclick="aaSelectCat(this)">🏃 Exercise</button>
+        <button type="button" class="aa-cat-btn" data-cat="Meals" onclick="aaSelectCat(this)">🍽 Meals</button>
+        <button type="button" class="aa-cat-btn" data-cat="Other" onclick="aaSelectCat(this)">✍ Other</button>
+      </div>
+      <input type="text" class="aa-custom-input" id="aa-custom-activity" placeholder="Enter your activity or purpose…" oninput="aaClearCatIfTyping()">
+    </div>
+
+    <!-- Sound -->
+    <div class="add-alarm-section">
+      <div class="add-alarm-section-lbl">🔔 Alarm Sound</div>
+      <div class="sound-opts" id="aa-sounds">
+        <button class="sound-btn sel" data-sound="bell" onclick="aaSelectSound(this)">🔔 Bell</button>
+        <button class="sound-btn" data-sound="chime" onclick="aaSelectSound(this)">🎵 Chime</button>
+        <button class="sound-btn" data-sound="nature" onclick="aaSelectSound(this)">🌿 Nature</button>
+        <button class="sound-btn" data-sound="soft" onclick="aaSelectSound(this)">🎶 Soft Tone</button>
+        <button class="upload-sound-btn" onclick="document.getElementById('aa-sound-upload').click()">📎 My Sound</button>
+        <input type="file" id="aa-sound-upload" accept="audio/*" style="display:none" onchange="aaUploadSound(this)">
+      </div>
+    </div>
+
+    <div class="add-alarm-section" style="border-bottom:none">
+      <button class="auth-btn" onclick="saveAddAlarm()">💾 Save Alarm</button>
+      <div id="aa-msg" class="auth-msg" style="margin-top:10px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── SETTINGS MODAL ── -->
+<div id="settings-modal" class="modal-overlay" style="display:none" onclick="settingsOverlayClick(event)">
+  <div class="modal-box settings-box">
+    <div class="settings-header">
+      <div class="settings-title">⚙️ Account Settings</div>
+      <button class="add-alarm-close" onclick="closeSettings()">✕</button>
+    </div>
+
+    <!-- Avatar / info display -->
+    <div class="settings-avatar-row">
+      <div class="settings-avatar" id="st-avatar"></div>
+      <div class="settings-avatar-info">
+        <div class="settings-avatar-name" id="st-display-name"></div>
+        <div class="settings-avatar-user" id="st-display-user"></div>
+      </div>
+    </div>
+
+    <!-- Fields -->
+    <div class="settings-fields">
+
+      <div class="settings-field">
+        <label>Full Name</label>
+        <input type="text" id="st-name" class="settings-input" placeholder="Your full name" autocomplete="name">
+      </div>
+
+      <div class="settings-field">
+        <label>User ID <span class="settings-field-hint">(used to sign in)</span></label>
+        <input type="text" id="st-userid" class="settings-input" placeholder="Your user ID" autocomplete="username">
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <div class="settings-field">
+        <label>Current Password <span class="settings-field-hint">(your saved password)</span></label>
+        <div class="pw-wrap">
+          <input type="text" id="st-cur-pass" class="settings-input settings-input-pass" placeholder="—" autocomplete="off" readonly>
+          <button type="button" class="pw-toggle st-copy-btn" onclick="stCopyPassword()" tabindex="-1" title="Copy">📋</button>
+        </div>
+      </div>
+
+    </div>
+
+    <div id="st-msg" class="auth-msg" style="margin:0 20px 4px"></div>
+    <!-- Sign out -->
+    <div class="settings-signout">
+      <button class="settings-signout-btn" onclick="doLogout()">↩ Sign out</button>
+    </div>
+  </div>
+</div>
+
+
+<div id="alarm-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <div class="modal-icon" id="alarm-modal-icon">⏰</div>
+    <div class="modal-title" id="alarm-modal-title">Time to log!</div>
+    <div class="modal-sub" id="alarm-modal-sub">Your reminder is here.</div>
+    <div class="modal-btns">
+      <button class="modal-btn secondary" onclick="dismissAlarm()">Dismiss</button>
+      <button class="modal-btn primary" onclick="goLogFromAlarm()">Log now →</button>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="spttool.js" defer></script>
+<!-- <script src="api.js" defer></script> -->
+
+</body>
+</html>
