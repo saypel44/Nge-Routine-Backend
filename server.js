@@ -55,7 +55,7 @@ async function initDB() {
         name        VARCHAR(100) NOT NULL,
         password    VARCHAR(255) NOT NULL,
         joined_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        updated_at  TIMESTAMP NULL DEFAULT NULL
       )
     `);
     await conn.query(`
@@ -82,7 +82,7 @@ async function initDB() {
         alarm_key    VARCHAR(100) NOT NULL,
         alarm_data   JSON NOT NULL,
         created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        updated_at   TIMESTAMP NULL DEFAULT NULL,
         UNIQUE KEY uq_user_alarm (user_id, alarm_key),
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
@@ -91,7 +91,7 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS user_settings (
         user_id      INT PRIMARY KEY,
         settings     JSON NOT NULL,
-        updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        updated_at   TIMESTAMP NULL DEFAULT NULL,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
@@ -100,7 +100,6 @@ async function initDB() {
     conn.release();
   }
 }
-
 // ═══════════════════════════════════════
 //  AUTH ROUTES
 // ═══════════════════════════════════════
