@@ -71,7 +71,7 @@ async function initDB() {
         start_time   VARCHAR(20),
         end_time     VARCHAR(20),
         note         TEXT,
-        created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
@@ -81,8 +81,8 @@ async function initDB() {
         user_id      INT NOT NULL,
         alarm_key    VARCHAR(100) NOT NULL,
         alarm_data   JSON NOT NULL,
-        created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_user_alarm (user_id, alarm_key),
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
@@ -91,7 +91,7 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS user_settings (
         user_id      INT PRIMARY KEY,
         settings     JSON NOT NULL,
-        updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
