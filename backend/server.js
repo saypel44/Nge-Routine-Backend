@@ -54,8 +54,8 @@ async function initDB() {
         username    VARCHAR(50) UNIQUE NOT NULL,
         name        VARCHAR(100) NOT NULL,
         password    VARCHAR(255) NOT NULL,
-        joined_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        joined_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
     await conn.query(`
